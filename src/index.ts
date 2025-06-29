@@ -4,7 +4,24 @@ import { TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions';
 import * as dotenv from 'dotenv';
 import * as readline from 'readline';
-import { JsonFileStorage, IStorage } from './storage';
+import { JsonFileStorage, IStorage } from './storage'; // Припускаємо, що цей файл існує
+
+// --- ПРОСУНУТИЙ ЛОГГЕР ---
+const logger = {
+  info: (message: string, ...args: any[]) => {
+    console.log(`[${new Date().toISOString()}] [INFO]  `, message, ...args);
+  },
+  warn: (message: string, ...args: any[]) => {
+    console.warn(`[${new Date().toISOString()}] [WARN]  `, message, ...args);
+  },
+  error: (message: string, error?: any, ...args: any[]) => {
+    if (error) {
+      console.error(`[${new Date().toISOString()}] [ERROR] `, message, error, ...args);
+    } else {
+      console.error(`[${new Date().toISOString()}] [ERROR] `, message, ...args);
+    }
+  },
+};
 
 // --- Допоміжна функція для запитань в консолі ---
 function askQuestion(query: string): Promise<string> {
@@ -31,38 +48,33 @@ const usersInAddMode = new Set<number>();
 // --- ЧАСТИНА 1: БОТ ДЛЯ СПОВІЩЕНЬ (Telegraf) ---
 const notifierBot = new Telegraf(BOT_TOKEN);
 
-// ЗМІНЕНО: Функція тепер приймає messageId для створення посилання
 async function sendNotification(text: string, chatIds: number[], messageId: number) {
   if (chatIds.length === 0) return;
-  console.log(`Надсилаю сповіщення для ${chatIds.length} підписників...`);
+  logger.info(`Надсилаю сповіщення для ${chatIds.length} підписників...`);
 
   const notificationMessage = `🚨 **Увага! Повідомлення від водоканалу!** 🚨\n\n(Можливо, стосується вашої вулиці)\n\n---\n${text}`;
-
-  // Формуємо посилання на оригінальне повідомлення
   const sourceLink = `https://t.me/${SOURCE_CHANNEL_USERNAME!.replace('@', '')}/${messageId}`;
 
   const sendPromises = chatIds.map(chatId =>
       notifierBot.telegram.sendMessage(chatId, notificationMessage, {
         parse_mode: 'Markdown',
-        // ЗМІНЕНО: Додаємо інлайн-кнопку з посиланням
         reply_markup: {
           inline_keyboard: [
-            // Один ряд кнопок, в якому одна кнопка
             [{ text: '➡️ Перейти до джерела', url: sourceLink }]
           ]
         }
       })
           .catch(err => {
-            console.error(`Не вдалося надіслати повідомлення в чат ${chatId}:`, err.description);
+            logger.error(`Не вдалося надіслати повідомлення в чат ${chatId}:`, err);
             if (err.code === 403) {
-              console.log(`Користувач ${chatId} заблокував бота. Видаляємо зі списку підписників.`);
+              logger.warn(`Користувач ${chatId} заблокував бота. Видаляємо зі списку підписників.`);
               storage.removeSubscriber(chatId);
               storage.save();
             }
           })
   );
   await Promise.all(sendPromises);
-  console.log("Розсилку завершено.");
+  logger.info("Розсилку завершено.");
 }
 
 // --- Команди для управління підпискою ---
@@ -140,8 +152,8 @@ notifierBot.on(message('text'), async (ctx) => {
 async function main() {
   await storage.load();
 
-  console.log("Запускаємо Telegram клієнт...");
-  const client = new TelegramClient(new StringSession(SESSION_STRING || ''), apiId, apiHash, {
+  logger.info("Запускаємо Telegram клієнт...");
+  const client = new TelegramClient(stringSession, apiId, apiHash, {
     connectionRetries: 5,
   });
 
@@ -149,52 +161,47 @@ async function main() {
     phoneNumber: async () => await askQuestion("Введіть ваш номер телефону: "),
     password: async () => await askQuestion("Введіть ваш пароль 2FA: "),
     phoneCode: async () => await askQuestion("Введіть код, отриманий в Telegram: "),
-    onError: (err) => console.error(err),
+    onError: (err) => logger.error("Помилка під час авторизації клієнта:", err),
   });
-  console.log("✅ Клієнт успішно підключено!");
+  logger.info("✅ Клієнт успішно підключено!");
 
   const newSessionString = client.session.save();
-  if (!SESSION_STRING) {
-    console.log("\nВАЖЛИВО! Збережіть цей рядок сесії у вашому .env файлі як SESSION_STRING:\n", newSessionString, "\n");
+  if (!SESSION_STRING && newSessionString) {
+    logger.warn(`\nВАЖЛИВО! Збережіть цей рядок сесії у вашому .env файлі як SESSION_STRING:\n${newSessionString}\n`);
   }
 
   try {
-    console.log(`\n--- Тестовий запит до каналу ${SOURCE_CHANNEL_USERNAME} ---`);
+    logger.info(`--- Тестовий запит до каналу ${SOURCE_CHANNEL_USERNAME} ---`);
     const [lastMessage] = await client.getMessages(SOURCE_CHANNEL_USERNAME, { limit: 1 });
     if (lastMessage && lastMessage.text) {
-      console.log("✅ Успішно отримано останнє повідомлення:");
-      console.log(`"${lastMessage.text.substring(0, 200)}..."`);
+      logger.info("✅ Успішно отримано останнє повідомлення:");
+      logger.info(`"${lastMessage.text.substring(0, 200)}..."`);
     } else if (lastMessage) {
-      console.log("✅ Успішно отримано останнє повідомлення (без тексту, можливо медіа).");
-    }
-    else {
-      console.warn("⚠️ Не вдалося отримати останнє повідомлення. Можливо, канал порожній або сталася помилка.");
+      logger.info("✅ Успішно отримано останнє повідомлення (без тексту, можливо медіа).");
+    } else {
+      logger.warn("⚠️ Не вдалося отримати останнє повідомлення. Можливо, канал порожній або сталася помилка.");
     }
   } catch (error: any) {
-    console.error("❌ Помилка під час отримання тестового повідомлення:", error.message);
-    console.error("Перевірте, чи правильний SOURCE_CHANNEL_USERNAME в .env і чи має акаунт доступ до цього каналу.");
+    logger.error("❌ Помилка під час отримання тестового повідомлення. Перевірте, чи правильний SOURCE_CHANNEL_USERNAME в .env і чи має акаунт доступ до цього каналу.", error);
   }
-  console.log("--------------------------------------------------\n");
+  logger.info("--------------------------------------------------\n");
 
   client.addEventHandler(async (event) => {
-    // Використовуємо ваш робочий варіант: event.message.message для тексту
     const messageText = event.message?.message;
-    // ЗМІНЕНО: Отримуємо також ID повідомлення
     const messageId = event.message?.id;
 
-    // Перевіряємо, що в нас є і текст, і ID
     if (!messageText || !messageId) return;
 
     const lowerCaseMessage = messageText.toLowerCase();
 
-    console.log(`[${new Date().toISOString()}] Отримано повідомлення #${messageId} з каналу...`);
+    logger.info(`Отримано повідомлення #${messageId} з каналу...`);
 
     const allSubscriptions = await storage.getAllSubscriptions();
     const usersToNotify = new Set<number>();
 
     for (const [chatId, streets] of allSubscriptions.entries()) {
       for (const street of streets) {
-        if (lowerCaseMessage.includes(street)) {
+        if (lowerCaseMessage.includes(street.toLowerCase())) {
           usersToNotify.add(chatId);
           break;
         }
@@ -202,22 +209,21 @@ async function main() {
     }
 
     if (usersToNotify.size > 0) {
-      console.log(`Знайдено збіги для ${usersToNotify.size} користувачів.`);
+      logger.info(`Знайдено збіги для ${usersToNotify.size} користувачів.`);
       const chatIdsToNotify = Array.from(usersToNotify);
-      // ЗМІНЕНО: Передаємо messageId у функцію розсилки
       await sendNotification(messageText, chatIdsToNotify, messageId);
     } else {
-      console.log("Збігів для підписників не знайдено.");
+      logger.info("Збігів для підписників не знайдено.");
     }
   });
 
-  await notifierBot.launch(() => console.log("✅ Бот для сповіщень запущено."));
-  console.log(`🎧 Прослуховування каналу ${SOURCE_CHANNEL_USERNAME!.replace('@','')} розпочато...`);
+  await notifierBot.launch(() => logger.info("✅ Бот для сповіщень запущено."));
+  logger.info(`🎧 Прослуховування каналу ${SOURCE_CHANNEL_USERNAME!.replace('@','')} розпочато...`);
 }
 
 // --- Обробка коректного завершення роботи ---
 async function gracefulShutdown(signal: string) {
-  console.log(`Отримано сигнал ${signal}. Завершення роботи...`);
+  logger.info(`Отримано сигнал ${signal}. Завершення роботи...`);
   await storage.save();
   notifierBot.stop(signal);
   process.exit(0);
@@ -226,6 +232,6 @@ process.once('SIGINT', () => gracefulShutdown('SIGINT'));
 process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 main().catch(err => {
-  console.error("Сталася критична помилка в головній функції:", err);
+  logger.error("Сталася критична помилка в головній функції:", err);
   process.exit(1);
 });
